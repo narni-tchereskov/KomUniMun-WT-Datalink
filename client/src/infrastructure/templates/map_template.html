@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WT Datalink</title>
+    <style>
+      body {
+        background-color: #111;
+        color: white;
+        margin: 0;
+        font-family: sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+      }
+      #app-wrapper {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 10px;
+      }
+      #map-container {
+        position: relative;
+        border: 1px solid #333;
+      }
+      canvas {
+        background-color: #1a1a1a;
+        display: block;
+      }
+      #controls {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        z-index: 10;
+      }
+      .control-btn {
+        background-color: #444;
+        color: white;
+        border: 1px solid #666;
+        width: 32px;
+        height: 32px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        cursor: pointer;
+        font-size: 1.2em;
+        user-select: none;
+        box-sizing: border-box;
+      }
+      .control-btn:hover {
+        background-color: #666;
+      }
+      .control-btn:active {
+        background-color: #888;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app-wrapper">
+      <div id="map-container">
+        <canvas id="radarCanvas"></canvas>
+      </div>
+
+      <div id="controls">
+        <div class="control-btn" id="btn-quit" title="Exit Datalink">⭘</div>
+        <div class="control-btn" id="btn-fullscreen" title="Fullscreen">⛶</div>
+        <div class="control-btn" id="btn-recenter" title="Recenter">⌖</div>
+        <div class="control-btn" id="btn-zoom-in" title="Zoom In">+</div>
+        <div class="control-btn" id="btn-zoom-out" title="Zoom Out">-</div>
+      </div>
+    </div>
+
+    <script>
+      const canvas = document.getElementById('radarCanvas');
+      const container = document.getElementById('map-container');
+      const ctx = canvas.getContext('2d');
+
+      const zoomFactor = 1.05;
+      const defaultZoom = 1 / zoomFactor;
+
+      let mapInfo = null;
+      let currentZoom = defaultZoom;
+      let panX = 0;
+      let panY = 0;
+      let isDragging = false;
+      let lastMouseX = 0;
+      let lastMouseY = 0;
+      let cachedPlayers = {};
+      let isMapInfoLoaded = false;
+      let localUsername = '';
+
+      function resizeCanvas() {
+        const padding = 10;
+        const btnSpace = 42;
+
+        const size = Math.min(
+          window.innerWidth - padding - btnSpace,
+          window.innerHeight - padding,
+        );
+
+        container.style.width = `${size}px`;
+        container.style.height = `${size}px`;
+        canvas.width = size;
+        canvas.height = size;
+
+        if (isMapInfoLoaded && panX === 0 && panY === 0) {
+          recenterToDefault();
+        }
+
+        drawMapLoop();
+      }
+
+      function recenterToDefault() {
+        currentZoom = defaultZoom;
+        panX = (canvas.width - canvas.width * currentZoom) / 2;
+        panY = (canvas.height - canvas.height * currentZoom) / 2;
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+
+      setInterval(fetchLocalData, 1000);
+      setInterval(drawMapLoop, 100);
+
+      canvas.addEventListener('wheel', handleScrollZoom, { passive: false });
+      canvas.addEventListener('mousedown', handlePanStart);
+      window.addEventListener('mousemove', handlePanMove);
+      window.addEventListener('mouseup', handlePanEnd);
+
+      document
+        .getElementById('btn-zoom-in')
+        .addEventListener('click', () => adjustZoom(0.05));
+      document
+        .getElementById('btn-zoom-out')
+        .addEventListener('click', () => adjustZoom(-0.05));
+
+      document.getElementById('btn-recenter').addEventListener('click', () => {
+        currentZoom = 1.0;
+        panX = 0;
+        panY = 0;
+        drawMapLoop();
+      });
+
+      document
+        .getElementById('btn-fullscreen')
+        .addEventListener('click', () => {
+          if (!document.fullscreenElement) {
+            document.documentElement
+              .requestFullscreen()
+              .catch((err) => console.error(err));
+          } else {
+            document.exitFullscreen();
+          }
+        });
+
+      document
+        .getElementById('btn-quit')
+        .addEventListener('click', async () => {
+          if (confirm('Exit Datalink?')) {
+            try {
+              await fetch('/shutdown', { method: 'POST' });
+              document.body.innerHTML =
+                "<h2 style='color: white; text-align: center; margin-top: 20%;'>Datalink Offline</h2>";
+            } catch (e) {
+              console.log('Shutdown triggered');
+            }
+          }
+        });
+
+      function clampPan() {
+        const mapWidthPx = canvas.width * currentZoom;
+        const mapHeightPx = canvas.height * currentZoom;
+
+        if (currentZoom >= 1.0) {
+          panX = Math.min(0, Math.max(canvas.width - mapWidthPx, panX));
+          panY = Math.min(0, Math.max(canvas.height - mapHeightPx, panY));
+        } else {
+          const minX = canvas.width - mapWidthPx;
+          const minY = canvas.height - mapHeightPx;
+          panX = Math.max(0, Math.min(minX, panX));
+          panY = Math.max(0, Math.min(minY, panY));
+        }
+      }
+
+      function adjustZoom(delta) {
+        const oldZoom = currentZoom;
+        currentZoom =
+          delta > 0 ? currentZoom * zoomFactor : currentZoom / zoomFactor;
+        currentZoom = Math.max(0.1, Math.min(15.0, currentZoom));
+
+        const zoomRatio = currentZoom / oldZoom;
+        panX = canvas.width / 2 - (canvas.width / 2 - panX) * zoomRatio;
+        panY = canvas.height / 2 - (canvas.height / 2 - panY) * zoomRatio;
+
+        clampPan();
+        drawMapLoop();
+      }
+
+      function handleScrollZoom(event) {
+        event.preventDefault();
+        const oldZoom = currentZoom;
+        currentZoom = Math.max(
+          0.1,
+          Math.min(15.0, currentZoom + event.deltaY * -0.001),
+        );
+
+        const zoomRatio = currentZoom / oldZoom;
+        panX = event.offsetX - (event.offsetX - panX) * zoomRatio;
+        panY = event.offsetY - (event.offsetY - panY) * zoomRatio;
+
+        clampPan();
+        drawMapLoop();
+      }
+
+      function handlePanStart(event) {
+        isDragging = true;
+        lastMouseX = event.clientX;
+        lastMouseY = event.clientY;
+      }
+
+      function handlePanEnd() {
+        isDragging = false;
+      }
+
+      function handlePanMove(event) {
+        if (!isDragging) return;
+        event.preventDefault();
+        panX += event.clientX - lastMouseX;
+        panY += event.clientY - lastMouseY;
+        lastMouseX = event.clientX;
+        lastMouseY = event.clientY;
+        clampPan();
+        drawMapLoop();
+      }
+
+      async function fetchMapInfo() {
+        try {
+          const res = await fetch('/api/map');
+          if (res.ok) {
+            mapInfo = await res.json();
+            isMapInfoLoaded = true;
+            recenterToDefault();
+            resizeCanvas();
+          }
+        } catch (e) {
+          console.error('Map Info Failed:', e);
+        }
+      }
+
+      async function fetchLocalData() {
+        if (!isMapInfoLoaded) {
+          await fetchMapInfo();
+          if (!isMapInfoLoaded) return;
+        }
+        try {
+          const res = await fetch('/api/data');
+          if (res.ok) {
+            const data = await res.json();
+            cachedPlayers = data.players || {};
+            localUsername = data.local_username || data.username || '';
+            drawMapLoop();
+          }
+        } catch (e) {
+          console.error('Data Sync Failed:', e);
+        }
+      }
+
+      function drawMapLoop() {
+        if (!isMapInfoLoaded) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(panX, panY);
+        ctx.scale(currentZoom, currentZoom);
+        drawGridAndLabels();
+        const selfPlayer = cachedPlayers[localUsername];
+
+        for (const username in cachedPlayers) {
+          drawPlayer(
+            cachedPlayers[username],
+            username,
+            selfPlayer,
+            username === localUsername,
+          );
+        }
+        ctx.restore();
+      }
+
+      function drawGridAndLabels() {
+        const { map_min, map_max, grid_steps } = mapInfo;
+        const unitToPxX = canvas.width / (map_max[0] - map_min[0]);
+        const unitToPxY = canvas.height / (map_max[1] - map_min[1]);
+
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#333';
+        ctx.fillStyle = '#666';
+
+        ctx.save();
+        ctx.scale(1 / currentZoom, 1 / currentZoom);
+        ctx.font = '8px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (
+          let y = map_min[1], i = 0;
+          y <= map_max[1];
+          y += grid_steps[1], i++
+        ) {
+          const yPx = (y - map_min[1]) * unitToPxY * currentZoom;
+          ctx.beginPath();
+          ctx.moveTo(0, yPx);
+          ctx.lineTo(canvas.width * currentZoom, yPx);
+          ctx.stroke();
+
+          if (y < map_max[1] && i < 26) {
+            ctx.fillText(
+              String.fromCharCode(65 + i),
+              -12,
+              yPx + (grid_steps[1] * unitToPxY * currentZoom) / 2,
+            );
+          }
+        }
+
+        for (
+          let x = map_min[0], i = 0;
+          x <= map_max[0];
+          x += grid_steps[0], i++
+        ) {
+          const xPx = (x - map_min[0]) * unitToPxX * currentZoom;
+          ctx.beginPath();
+          ctx.moveTo(xPx, 0);
+          ctx.lineTo(xPx, canvas.height * currentZoom);
+          ctx.stroke();
+
+          if (x < map_max[0]) {
+            ctx.fillText(
+              (i + 1).toString(),
+              xPx + (grid_steps[0] * unitToPxX * currentZoom) / 2,
+              -12,
+            );
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawPlayer(player, username, selfPlayer, isSelf) {
+        const { map_min, map_max } = mapInfo;
+        const playerPxX =
+          (player.x - map_min[0]) * (canvas.width / (map_max[0] - map_min[0]));
+        const playerPxY =
+          (player.y - map_min[1]) * (canvas.height / (map_max[1] - map_min[1]));
+        const color = isSelf ? '#00FFFF' : '#00FF00';
+
+        ctx.save();
+        ctx.translate(playerPxX, playerPxY);
+
+        ctx.save();
+        ctx.rotate(((player.compass - 90) * Math.PI) / 180);
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 0.5 / currentZoom;
+        const size = 0.7;
+        ctx.beginPath();
+        ctx.moveTo(0, (-12 * size) / currentZoom);
+        ctx.lineTo((8 * size) / currentZoom, (10 * size) / currentZoom);
+        ctx.lineTo((-8 * size) / currentZoom, (10 * size) / currentZoom);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.save();
+        ctx.scale(1 / currentZoom, 1 / currentZoom);
+
+        if (selfPlayer && selfPlayer.altitude !== undefined && !isSelf) {
+          const altDiff = player.altitude - selfPlayer.altitude;
+          ctx.font = '10px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = color;
+          if (altDiff > 200) ctx.fillText('▲', 25, 0);
+          else if (altDiff < -200) ctx.fillText('▼', 25, 0);
+          else ctx.fillText('━', 25, 0);
+        }
+
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.lineWidth = 1;
+
+        const diagX = 7.5;
+        const diagY = -10;
+        const textWidth = ctx.measureText(username).width;
+        const horizLineLength = textWidth + 3;
+
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(diagX, diagY);
+        ctx.lineTo(diagX + horizLineLength, diagY);
+        ctx.stroke();
+
+        ctx.fillText(username, diagX, diagY - 4);
+        ctx.restore();
+        ctx.restore();
+      }
+
+      resizeCanvas();
+    </script>
+  </body>
+</html>

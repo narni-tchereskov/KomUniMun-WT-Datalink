@@ -1,0 +1,6 @@
+pydantic-settings
+cryptography
+starlette
+async-lru
+uvicorn
+httpx
