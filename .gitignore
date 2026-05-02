@@ -6,6 +6,7 @@
 
 *.pem
 *.log
+*.spec
 
 config.txt
 .env
