@@ -1,0 +1,10 @@
+*logs/
+*build/
+*dist/
+*built/
+
+*.pem
+*.log
+
+config.txt
+.env
