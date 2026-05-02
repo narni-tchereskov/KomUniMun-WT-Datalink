@@ -176,6 +176,12 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+async def get_background(request: Request):
+    """Endpoint for getting the background map image from the localhost API."""
+
+    return await request.app.state.map_router.get_background(request)
+
+
 async def synchronize_data(request: Request):
     """Endpoint for data synchronization, shares the data with the map."""
 
@@ -200,6 +206,7 @@ app = Starlette(
     routes=[
         Route("/shutdown", shutdown_server, methods=["POST"]),
         Route("/health", health_check, methods=["GET"]),
+        Route("/api/background.img", get_background, methods=["GET"]),
         Route("/api/data", synchronize_data, methods=["GET"]),
         Route("/api/map", get_map_info, methods=["GET"]),
         Route("/", display_map, methods=["GET"]),

@@ -48,7 +48,6 @@
         cursor: pointer;
         font-size: 1.2em;
         user-select: none;
-        box-sizing: border-box;
       }
       .control-btn:hover {
         background-color: #666;
@@ -79,7 +78,7 @@
       const ctx = canvas.getContext('2d');
 
       const zoomFactor = 1.05;
-      const defaultZoom = 1 / zoomFactor;
+      const defaultZoom = 1;
 
       let mapInfo = null;
       let currentZoom = defaultZoom;
@@ -92,23 +91,23 @@
       let isMapInfoLoaded = false;
       let localUsername = '';
 
+      const mapImage = new Image();
+
       function resizeCanvas() {
         const padding = 10;
         const btnSpace = 42;
 
-        const size = Math.min(
-          window.innerWidth - padding - btnSpace,
-          window.innerHeight - padding,
+        const size = Math.floor(
+          Math.min(
+            window.innerWidth - padding - btnSpace,
+            window.innerHeight - padding,
+          ),
         );
 
         container.style.width = `${size}px`;
         container.style.height = `${size}px`;
         canvas.width = size;
         canvas.height = size;
-
-        if (isMapInfoLoaded && panX === 0 && panY === 0) {
-          recenterToDefault();
-        }
 
         drawMapLoop();
       }
@@ -137,9 +136,7 @@
         .addEventListener('click', () => adjustZoom(-0.05));
 
       document.getElementById('btn-recenter').addEventListener('click', () => {
-        currentZoom = 1.0;
-        panX = 0;
-        panY = 0;
+        recenterToDefault();
         drawMapLoop();
       });
 
@@ -170,15 +167,15 @@
         });
 
       function clampPan() {
-        const mapWidthPx = canvas.width * currentZoom;
-        const mapHeightPx = canvas.height * currentZoom;
+        const mapWidthPx = (canvas.width - 1) * currentZoom;
+        const mapHeightPx = (canvas.height - 1) * currentZoom;
 
         if (currentZoom >= 1.0) {
-          panX = Math.min(0, Math.max(canvas.width - mapWidthPx, panX));
-          panY = Math.min(0, Math.max(canvas.height - mapHeightPx, panY));
+          panX = Math.min(0, Math.max(canvas.width - mapWidthPx - 1, panX));
+          panY = Math.min(0, Math.max(canvas.height - mapHeightPx - 1, panY));
         } else {
-          const minX = canvas.width - mapWidthPx;
-          const minY = canvas.height - mapHeightPx;
+          const minX = canvas.width - mapWidthPx - 1;
+          const minY = canvas.height - mapHeightPx - 1;
           panX = Math.max(0, Math.min(minX, panX));
           panY = Math.max(0, Math.min(minY, panY));
         }
@@ -188,7 +185,7 @@
         const oldZoom = currentZoom;
         currentZoom =
           delta > 0 ? currentZoom * zoomFactor : currentZoom / zoomFactor;
-        currentZoom = Math.max(0.1, Math.min(15.0, currentZoom));
+        currentZoom = Math.max(1.0, Math.min(15.0, currentZoom));
 
         const zoomRatio = currentZoom / oldZoom;
         panX = canvas.width / 2 - (canvas.width / 2 - panX) * zoomRatio;
@@ -202,7 +199,7 @@
         event.preventDefault();
         const oldZoom = currentZoom;
         currentZoom = Math.max(
-          0.1,
+          1.0,
           Math.min(15.0, currentZoom + event.deltaY * -0.001),
         );
 
@@ -241,7 +238,7 @@
           if (res.ok) {
             mapInfo = await res.json();
             isMapInfoLoaded = true;
-            recenterToDefault();
+            mapImage.src = '/api/background.img?gen=' + mapInfo.map_generation;
             resizeCanvas();
           }
         } catch (e) {
@@ -259,7 +256,16 @@
           if (res.ok) {
             const data = await res.json();
             cachedPlayers = data.players || {};
-            localUsername = data.local_username || data.username || '';
+            localUsername = data.username || '';
+
+            if (
+              data.map_generation !== undefined &&
+              data.map_generation !== mapInfo.map_generation
+            ) {
+              isMapInfoLoaded = false;
+              await fetchMapInfo();
+            }
+
             drawMapLoop();
           }
         } catch (e) {
@@ -273,6 +279,11 @@
         ctx.save();
         ctx.translate(panX, panY);
         ctx.scale(currentZoom, currentZoom);
+
+        if (mapImage.complete && mapImage.naturalWidth) {
+          ctx.drawImage(mapImage, 0, 0, canvas.width, canvas.height);
+        }
+
         drawGridAndLabels();
         const selfPlayer = cachedPlayers[localUsername];
 
@@ -288,75 +299,74 @@
       }
 
       function drawGridAndLabels() {
+        if (!mapInfo.map_min) return;
+
         const { map_min, map_max, grid_steps } = mapInfo;
-        const unitToPxX = canvas.width / (map_max[0] - map_min[0]);
-        const unitToPxY = canvas.height / (map_max[1] - map_min[1]);
+        const w = canvas.width - 1;
+        const h = canvas.height - 1;
+        const scX = w / (map_max[0] - map_min[0]);
+        const scY = h / (map_max[1] - map_min[1]);
 
         ctx.lineWidth = 1;
-        ctx.strokeStyle = '#333';
-        ctx.fillStyle = '#666';
+        ctx.strokeStyle = 'rgba(170, 170, 170, 0.4)'
 
         ctx.save();
         ctx.scale(1 / currentZoom, 1 / currentZoom);
-        ctx.font = '8px Arial';
-        ctx.textAlign = 'center';
+
+        ctx.beginPath();
+        for (let y = map_min[1]; y <= map_max[1]; y += grid_steps[1]) {
+          let yy = Math.floor((y - map_min[1]) * scY * currentZoom) + 0.5;
+          ctx.moveTo(0, yy);
+          ctx.lineTo((w + 1) * currentZoom, yy);
+        }
+        for (let x = map_min[0]; x <= map_max[0]; x += grid_steps[0]) {
+          let xx = Math.floor((x - map_min[0]) * scX * currentZoom) + 0.5;
+          ctx.moveTo(xx, 0);
+          ctx.lineTo(xx, (h + 1) * currentZoom);
+        }
+        ctx.stroke();
+
+        ctx.fillStyle = '#aaa';
+        ctx.font = 'normal 12px sans-serif';
         ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
 
+        let n = 0;
         for (
-          let y = map_min[1], i = 0;
-          y <= map_max[1];
-          y += grid_steps[1], i++
+          let y = map_min[1] + grid_steps[1] * 0.5;
+          y <= map_max[1] && n < 26;
+          y += grid_steps[1], ++n
         ) {
-          const yPx = (y - map_min[1]) * unitToPxY * currentZoom;
-          ctx.beginPath();
-          ctx.moveTo(0, yPx);
-          ctx.lineTo(canvas.width * currentZoom, yPx);
-          ctx.stroke();
-
-          if (y < map_max[1] && i < 26) {
-            ctx.fillText(
-              String.fromCharCode(65 + i),
-              -12,
-              yPx + (grid_steps[1] * unitToPxY * currentZoom) / 2,
-            );
-          }
+          let yy = Math.floor((y - map_min[1]) * scY * currentZoom) + 0.5;
+          if (y < map_max[1]) ctx.fillText(String.fromCharCode(65 + n), 6, yy);
         }
 
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'center';
+
+        n = 1;
         for (
-          let x = map_min[0], i = 0;
+          let x = map_min[0] + grid_steps[0] * 0.5;
           x <= map_max[0];
-          x += grid_steps[0], i++
+          x += grid_steps[0], ++n
         ) {
-          const xPx = (x - map_min[0]) * unitToPxX * currentZoom;
-          ctx.beginPath();
-          ctx.moveTo(xPx, 0);
-          ctx.lineTo(xPx, canvas.height * currentZoom);
-          ctx.stroke();
-
-          if (x < map_max[0]) {
-            ctx.fillText(
-              (i + 1).toString(),
-              xPx + (grid_steps[0] * unitToPxX * currentZoom) / 2,
-              -12,
-            );
-          }
+          let xx = Math.floor((x - map_min[0]) * scX * currentZoom) + 0.5;
+          if (x < map_max[0]) ctx.fillText(n.toString(), xx, 6);
         }
+
         ctx.restore();
       }
 
       function drawPlayer(player, username, selfPlayer, isSelf) {
-        const { map_min, map_max } = mapInfo;
-        const playerPxX =
-          (player.x - map_min[0]) * (canvas.width / (map_max[0] - map_min[0]));
-        const playerPxY =
-          (player.y - map_min[1]) * (canvas.height / (map_max[1] - map_min[1]));
+        const playerPxX = player.x * (canvas.width - 1);
+        const playerPxY = player.y * (canvas.height - 1);
         const color = isSelf ? '#00FFFF' : '#00FF00';
 
         ctx.save();
         ctx.translate(playerPxX, playerPxY);
 
         ctx.save();
-        ctx.rotate(((player.compass - 90) * Math.PI) / 180);
+        ctx.rotate((player.compass * Math.PI) / 180);
         ctx.fillStyle = color;
         ctx.strokeStyle = color;
         ctx.lineWidth = 0.5 / currentZoom;
@@ -408,6 +418,7 @@
       }
 
       resizeCanvas();
+      recenterToDefault();
     </script>
   </body>
 </html>
